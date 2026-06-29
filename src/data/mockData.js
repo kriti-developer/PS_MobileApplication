@@ -1,8 +1,13 @@
-// Browse-only mock catalog for Home's search / Top Rated / "What do you
-// want to eat" sections. None of this is wired to the real backend - it's
-// just for discovering restaurants and dishes. A dish can be served by
-// more than one restaurant, which is what the "see all restaurants with
-// this dish" screen is for.
+// Catalog for Home's search / Top Rated / "What do you want to eat"
+// sections, and for the cart/order flow. RESTAURANTS/DISHES/MENU_ITEMS
+// start out as this hardcoded mock data (so there's something to render
+// immediately), then loadCatalogFromBackend() below replaces their
+// contents in place with the real backend catalog once it's fetched - see
+// AppContext.js, which awaits it before rendering any screen. A dish can
+// be served by more than one restaurant, which is what the "see all
+// restaurants with this dish" screen is for; the real backend has no such
+// grouping, so it's derived by matching menu item names across
+// restaurants instead.
 
 export const RESTAURANTS = [
   {
@@ -181,4 +186,81 @@ export function searchCatalog(query) {
     restaurants: RESTAURANTS.filter((r) => r.name.toLowerCase().includes(q)),
     dishes: DISHES.filter((d) => d.name.toLowerCase().includes(q)),
   };
+}
+
+// The real backend has no lat/lng for restaurants. Reuses the mock
+// coordinates above, keyed by name, so the map in OrdersScreen still has
+// somewhere sensible to put each restaurant's pin; falls back to a small
+// offset from DELIVERY_DESTINATION for any restaurant name it doesn't
+// recognize (e.g. one added on the backend after this list was written).
+const KNOWN_LOCATIONS = new Map(RESTAURANTS.map((r) => [r.name, r.location]));
+function locationForRestaurantName(name, index) {
+  return (
+    KNOWN_LOCATIONS.get(name) || {
+      latitude: DELIVERY_DESTINATION.latitude + 0.01 * (index + 1),
+      longitude: DELIVERY_DESTINATION.longitude + 0.01 * (index + 1),
+    }
+  );
+}
+
+function slugify(name) {
+  return name.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-');
+}
+
+// Fetches the real catalog (GET /api/catalog: restaurants, each with a
+// nested menuItems array) and replaces RESTAURANTS/DISHES/MENU_ITEMS'
+// contents in place with it, reshaped into this file's existing shape -
+// so every helper above, and every screen that already imports from this
+// file, keeps working unchanged, just backed by real ids/prices instead
+// of the hardcoded mock ones. Fails silently (keeping whatever was
+// already in these arrays) if the backend isn't reachable, same as the
+// rest of the app's "don't block on the backend" approach.
+export async function loadCatalogFromBackend(apiBase) {
+  try {
+    const res = await fetch(`${apiBase}/api/catalog`);
+    if (!res.ok) return;
+    const catalog = await res.json();
+
+    const restaurants = catalog.map((r, index) => ({
+      id: r._id,
+      name: r.name,
+      cuisine: r.cuisine,
+      rating: r.rating,
+      deliveryTime: r.deliveryTime,
+      costForTwo: r.costForTwo,
+      address: r.address,
+      emoji: r.emoji,
+      location: locationForRestaurantName(r.name, index),
+    }));
+
+    const dishesByName = new Map();
+    const menuItems = [];
+    catalog.forEach((restaurant) => {
+      (restaurant.menuItems || []).forEach((item) => {
+        const dishId = slugify(item.name);
+        if (!dishesByName.has(dishId)) {
+          dishesByName.set(dishId, { id: dishId, name: item.name, emoji: item.emoji });
+        }
+        menuItems.push({
+          id: item._id,
+          restaurantId: restaurant._id,
+          dishId,
+          name: item.name,
+          emoji: item.emoji,
+          price: item.price,
+        });
+      });
+    });
+
+    RESTAURANTS.length = 0;
+    RESTAURANTS.push(...restaurants);
+    DISHES.length = 0;
+    DISHES.push(...dishesByName.values());
+    MENU_ITEMS.length = 0;
+    MENU_ITEMS.push(...menuItems);
+  } catch (e) {
+    // Backend unreachable - keep the mock catalog already in these arrays
+    // so the app is still browsable, same as the rest of the app's
+    // graceful-degradation approach.
+  }
 }

@@ -58,9 +58,9 @@ function MainTabs() {
 }
 
 export default function RootNavigator() {
-  const { user, isRestoringSession } = useApp();
+  const { user, isRestoringSession, isLoadingCatalog } = useApp();
 
-  if (isRestoringSession) return null;
+  if (isRestoringSession || isLoadingCatalog) return null;
 
   return (
     <NavigationContainer>

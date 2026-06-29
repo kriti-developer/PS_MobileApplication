@@ -14,51 +14,43 @@ import { useApp } from '../context/AppContext';
 import PrimaryButton from '../components/PrimaryButton';
 import { colors } from '../theme/colors';
 
-// The backend only tracks "pending" and "accepted" orders, and only once a
-// real rider opens rider-app.html and accepts - there's no "preparing" or
-// "delivered" status, and waiting on a real rider is slow to test. So the
-// whole timeline below is simulated locally: a random driver is assigned
-// the moment the order is placed, and stages auto-advance on a timer. The
-// backend still has the real order in its own store (for the dashboard),
-// it just isn't what drives this screen anymore.
-const STAGE_INTERVAL_MS = 4000;
-const RIDER_NAMES = ['Raj Kumar', 'Amit Singh', 'Suresh Patel', 'Vikram Yadav', 'Arjun Mehta'];
+// Driven by the order's real status now (pending/confirmed/preparing/
+// on-the-way/delivered), pushed live via the order:updated socket event in
+// AppContext.js - whoever is operating the rider app controls these
+// transitions for real. The rider app's own flow skips "preparing" (it
+// goes straight from accept to "Order Collected" = on-the-way), so that
+// status maps to the same stage as "confirmed" here.
+const STATUS_TO_STAGE_INDEX = {
+  pending: 0,
+  confirmed: 1,
+  preparing: 1,
+  'on-the-way': 2,
+  delivered: 3,
+};
 const OUT_FOR_DELIVERY_INDEX = ORDER_STAGES.findIndex((stage) => stage.key === 'out_for_delivery');
-const TOTAL_TRIP_MS = (ORDER_STAGES.length - 1) * STAGE_INTERVAL_MS;
 
 export default function OrdersScreen({ navigation }) {
   const { order, resetOrder } = useApp();
   const insets = useSafeAreaInsets();
-  const [stageIndex, setStageIndex] = useState(0);
-  const [riderName, setRiderName] = useState(null);
-  const [stageChangedAt, setStageChangedAt] = useState(null);
   const [now, setNow] = useState(Date.now());
   const [rating, setRating] = useState(0);
   const scrollViewRef = useRef(null);
 
   useEffect(() => {
     if (!order) return;
-    setStageIndex(0);
-    setStageChangedAt(Date.now());
-    setRiderName(RIDER_NAMES[Math.floor(Math.random() * RIDER_NAMES.length)]);
     setRating(0);
-  }, [order?.id]);
+  }, [order?._id]);
 
-  useEffect(() => {
-    if (!order || stageIndex >= ORDER_STAGES.length - 1) return;
-    const timer = setTimeout(() => {
-      setStageIndex((s) => s + 1);
-      setStageChangedAt(Date.now());
-    }, STAGE_INTERVAL_MS);
-    return () => clearTimeout(timer);
-  }, [order?.id, stageIndex]);
-
+  const stageIndex = order ? STATUS_TO_STAGE_INDEX[order.status] ?? 0 : 0;
   const isDelivered = stageIndex >= ORDER_STAGES.length - 1;
+
+  // Ticks while there's an order in flight, to drive the live ETA
+  // countdown and the partner marker's position on the map below.
   useEffect(() => {
     if (!order || isDelivered) return;
-    const interval = setInterval(() => setNow(Date.now()), 200);
+    const interval = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(interval);
-  }, [order?.id, isDelivered]);
+  }, [order?._id, isDelivered]);
 
   useEffect(() => {
     if (isDelivered) {
@@ -80,14 +72,16 @@ export default function OrdersScreen({ navigation }) {
   }
 
   const showMap = stageIndex >= OUT_FOR_DELIVERY_INDEX;
-  const restaurant = getRestaurantById(order.restaurantId);
+  const restaurant = getRestaurantById(order.restaurant?._id);
 
-  // ETA banner: starts at the restaurant's usual top-end estimate (e.g. "30"
-  // from "25-30 min") and counts down to 0 as the simulated trip progresses,
-  // so it reaches zero right as the order is marked delivered.
+  // ETA banner: counts down from the restaurant's usual top-end estimate
+  // (e.g. "30" from "25-30 min") based on real elapsed time since the
+  // order was placed - not fully real (no GPS), but a true elapsed-time
+  // estimate rather than a fixed demo countdown.
   const etaTotalMinutes = restaurant ? parseDeliveryTime(restaurant.deliveryTime).max : null;
+  const totalTripMs = etaTotalMinutes ? etaTotalMinutes * 60 * 1000 : null;
   const tripElapsedMs = now - new Date(order.createdAt).getTime();
-  const tripProgress = Math.min(Math.max(tripElapsedMs / TOTAL_TRIP_MS, 0), 1);
+  const tripProgress = totalTripMs ? Math.min(Math.max(tripElapsedMs / totalTripMs, 0), 1) : 0;
   const minutesRemaining = isDelivered
     ? 0
     : etaTotalMinutes
@@ -99,9 +93,14 @@ export default function OrdersScreen({ navigation }) {
   if (showMap && restaurant) {
     const start = restaurant.location;
     const end = DELIVERY_DESTINATION;
+    // order.updatedAt is when the order last changed status - while it's
+    // "on-the-way" that's the moment the rider collected it, so this is a
+    // real elapsed-time-based estimate of how far along the trip is.
+    const onTheWayStartedAt = new Date(order.updatedAt).getTime();
+    const assumedTransitMs = totalTripMs || 5 * 60 * 1000;
     const progress = isDelivered
       ? 1
-      : Math.min(Math.max((now - stageChangedAt) / STAGE_INTERVAL_MS, 0), 1);
+      : Math.min(Math.max((now - onTheWayStartedAt) / assumedTransitMs, 0), 1);
     partnerCoordinate = {
       latitude: start.latitude + (end.latitude - start.latitude) * progress,
       longitude: start.longitude + (end.longitude - start.longitude) * progress,
@@ -200,7 +199,7 @@ export default function OrdersScreen({ navigation }) {
             <Text style={styles.partnerEmoji}>{DELIVERY_PARTNER.emoji}</Text>
           </View>
           <View style={styles.partnerInfo}>
-            <Text style={styles.partnerName}>{riderName}</Text>
+            <Text style={styles.partnerName}>Delivery Partner</Text>
             <Text style={styles.partnerMeta}>{DELIVERY_PARTNER.vehicle}</Text>
             <View style={styles.partnerRatingRow}>
               <Ionicons name="star" size={13} color={colors.warning} />
@@ -221,7 +220,7 @@ export default function OrdersScreen({ navigation }) {
           <Text style={styles.doneText}>Your order has been delivered. Enjoy! 🎉</Text>
 
           <View style={styles.rateCard}>
-            <Text style={styles.rateTitle}>Rate {riderName}</Text>
+            <Text style={styles.rateTitle}>Rate your delivery partner</Text>
             <View style={styles.starsRow}>
               {[1, 2, 3, 4, 5].map((star) => (
                 <TouchableOpacity key={star} onPress={() => setRating(star)}>

@@ -10,7 +10,7 @@ import React, {
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { io } from 'socket.io-client';
 import { API_BASE } from '../config';
-import { getMenuItemById } from '../data/mockData';
+import { getMenuItemById, loadCatalogFromBackend } from '../data/mockData';
 
 const REGISTERED_USER_KEY = '@food_app/registeredUser';
 const SESSION_KEY = '@food_app/session';
@@ -20,6 +20,7 @@ const AppContext = createContext(null);
 export function AppProvider({ children }) {
   const [user, setUser] = useState(null);
   const [isRestoringSession, setIsRestoringSession] = useState(true);
+  const [isLoadingCatalog, setIsLoadingCatalog] = useState(true);
   const [cart, setCart] = useState({});
   const [order, setOrder] = useState(null); // the order this customer placed, straight from the backend
   const [menuItem, setMenuItem] = useState(null); // whatever the restaurant currently has live
@@ -32,6 +33,14 @@ export function AppProvider({ children }) {
         if (raw) setUser(JSON.parse(raw));
       })
       .finally(() => setIsRestoringSession(false));
+  }, []);
+
+  // Load the real catalog before any screen renders, so Home/Restaurant/
+  // DishRestaurants/ItemDetail/Cart - which all read RESTAURANTS/DISHES/
+  // MENU_ITEMS from mockData.js synchronously - see real data on their
+  // very first render instead of momentarily showing the mock fallback.
+  useEffect(() => {
+    loadCatalogFromBackend(API_BASE).finally(() => setIsLoadingCatalog(false));
   }, []);
 
   // Connect to the backend once, for as long as the app is open
@@ -56,7 +65,7 @@ export function AppProvider({ children }) {
     // A rider accepted (or any order changed status) - only react if
     // it's the order this customer is actually tracking.
     socket.on('order:updated', (updatedOrder) => {
-      setOrder((prev) => (prev && prev.id === updatedOrder.id ? updatedOrder : prev));
+      setOrder((prev) => (prev && prev._id === updatedOrder._id ? updatedOrder : prev));
     });
 
     return () => {
@@ -170,26 +179,36 @@ export function AppProvider({ children }) {
     setCart({ [itemId]: quantity });
   }, []);
 
-  // Places a fully local order from the cart. This used to POST to the
-  // backend, but the backend's /api/orders always orders whatever item
-  // *it* currently has live, ignoring anything we send - it has no way to
-  // represent "this customer ordered this specific catalog item from this
-  // specific restaurant." So the order (and its tracking on OrdersScreen)
-  // is entirely client-side for now; the real backend connection is still
-  // used for the live menuItem/socket plumbing above, just not for orders.
-  const placeOrder = useCallback(() => {
+  // Places a real order against the backend, now that cart items carry
+  // real catalog ids (see mockData.js's loadCatalogFromBackend) instead of
+  // hardcoded mock ones - so the rider app can actually see and accept it.
+  const placeOrder = useCallback(async () => {
     if (cartCount === 0) {
       return { success: false, message: 'Your cart is empty.' };
     }
-    setOrder({
-      id: `local-${Date.now()}`,
-      createdAt: new Date().toISOString(),
-      restaurantId: cartRestaurantId,
-      items: cartItems.map(({ item, quantity }) => ({ itemId: item.id, quantity })),
-    });
-    clearCart();
-    return { success: true };
-  }, [cartCount, cartItems, cartRestaurantId, clearCart]);
+    try {
+      const res = await fetch(`${API_BASE}/api/orders`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          customerName: user?.name || 'Guest',
+          restaurantId: cartRestaurantId,
+          items: cartItems.map(({ item, quantity }) => ({
+            menuItem: item.id,
+            quantity,
+            price: item.price,
+          })),
+        }),
+      });
+      if (!res.ok) throw new Error('Could not place your order. Please try again.');
+      const created = await res.json();
+      setOrder(created);
+      clearCart();
+      return { success: true };
+    } catch (e) {
+      return { success: false, message: e.message };
+    }
+  }, [cartCount, cartItems, cartRestaurantId, clearCart, user]);
 
   const resetOrder = useCallback(() => setOrder(null), []);
 
@@ -197,6 +216,7 @@ export function AppProvider({ children }) {
     () => ({
       user,
       isRestoringSession,
+      isLoadingCatalog,
       signUp,
       login,
       logout,
@@ -218,6 +238,7 @@ export function AppProvider({ children }) {
     [
       user,
       isRestoringSession,
+      isLoadingCatalog,
       signUp,
       login,
       logout,
